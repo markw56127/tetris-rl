@@ -79,17 +79,21 @@ def train_step(
     cur = torch.FloatTensor(afterstates).unsqueeze(1).to(device)  # (B, 1, H, W)
     q_pred = q_net(cur)                                            # (B,)
 
-    # Max Q over all valid next afterstates — single batched forward pass
+    # Double DQN: online net selects best action, target net evaluates it.
+    # Prevents overestimation bias that causes training instability.
     nxt = torch.FloatTensor(next_boards).to(device)                # (B, 40, H, W)
     nxt_flat = nxt.view(B * MAX_ACTIONS, 1, *nxt.shape[2:])        # (B*40, 1, H, W)
-    with torch.no_grad():
-        q_next_flat = q_target(nxt_flat)                           # (B*40,)
-    q_next = q_next_flat.view(B, MAX_ACTIONS)                      # (B, 40)
-
-    # Mask invalid actions (float ops instead of bool indexing for MPS compat)
     mask_f = torch.FloatTensor(next_masks).to(device)              # (B, 40)
-    q_next = q_next * mask_f + (1.0 - mask_f) * (-1e9)
-    max_next_q, _ = q_next.max(dim=1)                             # (B,)
+
+    with torch.no_grad():
+        # Online network picks the action
+        q_online = q_net(nxt_flat).view(B, MAX_ACTIONS)
+        q_online = q_online * mask_f + (1.0 - mask_f) * (-1e9)
+        best_actions = q_online.argmax(dim=1, keepdim=True)        # (B, 1)
+
+        # Target network evaluates that action's value
+        q_tgt = q_target(nxt_flat).view(B, MAX_ACTIONS)
+        max_next_q = q_tgt.gather(1, best_actions).squeeze(1)      # (B,)
 
     # Zero out terminal transitions
     dones_f = torch.FloatTensor(dones).to(device)                  # (B,)

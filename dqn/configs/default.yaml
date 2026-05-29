@@ -1,24 +1,24 @@
 device: "mps"
 seed: 42
 
-total_steps: 10_000_000
+total_steps: 8_000_000
 
 # Optimizer
 learning_rate: 1.0e-4
 gamma: 0.99
 
 # Replay buffer
-buffer_size: 100_000
-batch_size: 256
+buffer_size: 200_000
+batch_size: 128
 train_freq: 4             # train every N environment steps
 
 # Target network
-target_update_freq: 1_000 # hard update every N steps
+target_update_freq: 2_000 # hard update every N steps
 
 # Exploration
 epsilon_start: 1.0
 epsilon_end:   0.05
-epsilon_decay_steps: 1_000_000  # linear decay over first 1M steps
+epsilon_decay_steps: 3_000_000  # slow decay — learning happens throughout
 
 # Logging / checkpointing
 log_freq:        200      # print stats every N episodes
