@@ -1,15 +1,20 @@
 from __future__ import annotations
 import torch
 import torch.nn as nn
+from env.afterstate import QUEUE_LEN
 
 BOARD_ROWS = 20
 BOARD_COLS = 10
+N_PIECES   = 7
 
 
 class QNetwork(nn.Module):
     """
-    Maps a single afterstate board (20x10 binary grid) to a scalar Q-value.
-    Applied independently to each candidate placement; the agent picks the max.
+    Maps (afterstate board, upcoming piece queue) -> scalar Q-value.
+
+    Knowing what pieces are coming is critical for Tetris planning —
+    the same board position has very different value depending on whether
+    an I-piece or an S-piece is next.
     """
 
     def __init__(self):
@@ -24,14 +29,26 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Flatten(),                                  # (B, 3200)
         )
+        cnn_out = 64 * 10 * 5  # 3200
+
+        # Embed each queued piece as a 16-dim vector then flatten
+        self.piece_embed = nn.Embedding(N_PIECES, 16)
+        queue_dim = QUEUE_LEN * 16  # 48
+
         self.head = nn.Sequential(
-            nn.Linear(64 * 10 * 5, 256),
+            nn.Linear(cnn_out + queue_dim, 512),
             nn.ReLU(),
-            nn.Linear(256, 64),
+            nn.Linear(512, 128),
             nn.ReLU(),
-            nn.Linear(64, 1),
+            nn.Linear(128, 1),
         )
 
-    def forward(self, boards: torch.Tensor) -> torch.Tensor:
-        """boards: (B, 1, 20, 10) -> (B,)"""
-        return self.head(self.cnn(boards)).squeeze(-1)
+    def forward(self, boards: torch.Tensor, queue: torch.Tensor) -> torch.Tensor:
+        """
+        boards : (B, 1, 20, 10) float32
+        queue  : (B, QUEUE_LEN) int64
+        returns: (B,) float32
+        """
+        board_feat = self.cnn(boards)                    # (B, 3200)
+        queue_feat = self.piece_embed(queue).flatten(1)  # (B, 48)
+        return self.head(torch.cat([board_feat, queue_feat], dim=1)).squeeze(-1)

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Afterstate DQN for Tetris.
+Afterstate DQN for Tetris — queue-aware version.
 
-Key idea: instead of learning Q(board, action), we learn Q(afterstate) where
-afterstate is the board *after* a piece has been placed and lines cleared.
-The agent enumerates all valid placements each turn, scores each resulting
-board with the Q-network, and picks the best one. This makes credit
-assignment much easier — the network only needs to learn "is this board
-position good?", not "is this action good from this board?".
+Key ideas:
+  1. Afterstate formulation: score each resulting board directly instead of
+     learning Q(board, action). Makes credit assignment much easier.
+  2. Queue awareness: the Q-network sees the next 3 pieces from the bag, so
+     it can plan around upcoming pieces (e.g. save a gap for an I-piece).
+  3. Double DQN: online net selects the best next action, target net evaluates
+     it, reducing Q-value overestimation.
 """
 import os
 import copy
@@ -20,7 +21,7 @@ import torch.optim as optim
 import yaml
 
 from tetris.game import Game
-from env.afterstate import compute_afterstates, MAX_ACTIONS
+from env.afterstate import compute_afterstates, MAX_ACTIONS, QUEUE_LEN
 from agent.networks import QNetwork
 from agent.replay_buffer import ReplayBuffer
 
@@ -28,10 +29,7 @@ LINE_REWARDS = [0.0, 1.0, 3.0, 5.0, 8.0]
 
 
 def reward_fn(lines: int, game_over: bool) -> float:
-    r = LINE_REWARDS[min(lines, 4)] + 0.1  # line reward + per-step survival bonus
-    if game_over:
-        r -= 1.0
-    return r
+    return LINE_REWARDS[min(lines, 4)] + 0.1 - (1.0 if game_over else 0.0)
 
 
 def get_device(name: str) -> torch.device:
@@ -44,8 +42,9 @@ def get_device(name: str) -> torch.device:
 
 def select_action(
     q_net: QNetwork,
-    boards: np.ndarray,
-    mask: np.ndarray,
+    boards: np.ndarray,    # (40, H, W)
+    queue: np.ndarray,     # (QUEUE_LEN,)
+    mask: np.ndarray,      # (40,) bool
     epsilon: float,
     device: torch.device,
 ) -> int:
@@ -54,10 +53,11 @@ def select_action(
         return 0
     if random.random() < epsilon:
         return int(np.random.choice(valid))
-    t = torch.FloatTensor(boards[valid]).unsqueeze(1).to(device)  # (n, 1, H, W)
+    b = torch.FloatTensor(boards[valid]).unsqueeze(1).to(device)    # (n, 1, H, W)
+    q = torch.LongTensor(queue).unsqueeze(0).expand(len(valid), -1).to(device)  # (n, QL)
     with torch.no_grad():
-        q = q_net(t).cpu().numpy()
-    return int(valid[int(np.argmax(q))])
+        vals = q_net(b, q).cpu().numpy()
+    return int(valid[int(np.argmax(vals))])
 
 
 def train_step(
@@ -72,33 +72,39 @@ def train_step(
     if len(buffer) < batch_size:
         return None
 
-    afterstates, rewards, next_boards, next_masks, dones = buffer.sample(batch_size)
+    afterstates, queues, rewards, next_boards, next_queues, next_masks, dones = \
+        buffer.sample(batch_size)
     B = batch_size
+    H, W = afterstates.shape[1], afterstates.shape[2]
 
-    # Q-values for chosen afterstates
-    cur = torch.FloatTensor(afterstates).unsqueeze(1).to(device)  # (B, 1, H, W)
-    q_pred = q_net(cur)                                            # (B,)
+    # ── Current Q-values ────────────────────────────────────────────────────
+    cur_b = torch.FloatTensor(afterstates).unsqueeze(1).to(device)   # (B, 1, H, W)
+    cur_q = torch.LongTensor(queues).to(device)                       # (B, QL)
+    q_pred = q_net(cur_b, cur_q)                                      # (B,)
 
-    # Double DQN: online net selects best action, target net evaluates it.
-    # Prevents overestimation bias that causes training instability.
-    nxt = torch.FloatTensor(next_boards).to(device)                # (B, 40, H, W)
-    nxt_flat = nxt.view(B * MAX_ACTIONS, 1, *nxt.shape[2:])        # (B*40, 1, H, W)
-    mask_f = torch.FloatTensor(next_masks).to(device)              # (B, 40)
+    # ── Double DQN target ───────────────────────────────────────────────────
+    nxt = torch.FloatTensor(next_boards).to(device)                   # (B, 40, H, W)
+    nxt_flat = nxt.view(B * MAX_ACTIONS, 1, H, W)                     # (B*40, 1, H, W)
+
+    # Repeat each queue entry for all 40 candidate boards
+    nxt_q = torch.LongTensor(next_queues).to(device)                  # (B, QL)
+    nxt_q_flat = nxt_q.unsqueeze(1).expand(B, MAX_ACTIONS, QUEUE_LEN) \
+                      .reshape(B * MAX_ACTIONS, QUEUE_LEN)             # (B*40, QL)
+
+    mask_f = torch.FloatTensor(next_masks).to(device)                 # (B, 40)
 
     with torch.no_grad():
-        # Online network picks the action
-        q_online = q_net(nxt_flat).view(B, MAX_ACTIONS)
+        # Online net picks action
+        q_online = q_net(nxt_flat, nxt_q_flat).view(B, MAX_ACTIONS)
         q_online = q_online * mask_f + (1.0 - mask_f) * (-1e9)
-        best_actions = q_online.argmax(dim=1, keepdim=True)        # (B, 1)
+        best_acts = q_online.argmax(dim=1, keepdim=True)              # (B, 1)
 
-        # Target network evaluates that action's value
-        q_tgt = q_target(nxt_flat).view(B, MAX_ACTIONS)
-        max_next_q = q_tgt.gather(1, best_actions).squeeze(1)      # (B,)
+        # Target net evaluates it
+        q_tgt = q_target(nxt_flat, nxt_q_flat).view(B, MAX_ACTIONS)
+        max_next_q = q_tgt.gather(1, best_acts).squeeze(1)            # (B,)
 
-    # Zero out terminal transitions
-    dones_f = torch.FloatTensor(dones).to(device)                  # (B,)
+    dones_f = torch.FloatTensor(dones).to(device)
     max_next_q = max_next_q * (1.0 - dones_f)
-
     targets = torch.FloatTensor(rewards).to(device) + gamma * max_next_q
 
     loss = nn.MSELoss()(q_pred, targets.detach())
@@ -124,67 +130,69 @@ def main():
     np.random.seed(cfg["seed"])
     random.seed(cfg["seed"])
 
-    q_net = QNetwork().to(device)
+    q_net    = QNetwork().to(device)
     q_target = copy.deepcopy(q_net)
     q_target.eval()
     print(f"Parameters: {sum(p.numel() for p in q_net.parameters()):,}")
 
     optimizer = optim.Adam(q_net.parameters(), lr=cfg["learning_rate"])
-    buffer = ReplayBuffer(cfg["buffer_size"])
+    buffer    = ReplayBuffer(cfg["buffer_size"])
 
     os.makedirs("checkpoints", exist_ok=True)
 
-    eps = cfg["epsilon_start"]
+    eps       = cfg["epsilon_start"]
     eps_start = cfg["epsilon_start"]
-    eps_end = cfg["epsilon_end"]
+    eps_end   = cfg["epsilon_end"]
     eps_steps = cfg["epsilon_decay_steps"]
 
     total_steps = 0
-    episode = 0
-    best_lines = 0
+    episode     = 0
+    best_lines  = 0
 
-    # Running averages for logging
     recent_rewards: list[float] = []
-    recent_lines: list[int] = []
-    recent_lengths: list[int] = []
+    recent_lines:   list[int]   = []
+    recent_lengths: list[int]   = []
 
     while total_steps < cfg["total_steps"]:
         game = Game(seed=None)
         ep_reward = 0.0
-        ep_lines = 0
-        ep_steps = 0
+        ep_lines  = 0
+        ep_steps  = 0
 
-        boards, _, mask = compute_afterstates(game)
+        boards, _, mask, queue = compute_afterstates(game)
 
         while not game.game_over and mask.any():
-            action = select_action(q_net, boards, mask, eps, device)
+            action       = select_action(q_net, boards, queue, mask, eps, device)
             chosen_board = boards[action].copy()
+            chosen_queue = queue.copy()
 
             rot, col = action // 10, action % 10
-            info = game.place_piece(rot, col, use_hold=False)
-            lines = info.get("lines", 0)
+            info     = game.place_piece(rot, col, use_hold=False)
+            lines    = info.get("lines", 0)
             game_over = info.get("game_over", False) or game.game_over
 
-            r = reward_fn(lines, game_over)
+            r          = reward_fn(lines, game_over)
             ep_reward += r
-            ep_lines += lines
-            ep_steps += 1
+            ep_lines  += lines
+            ep_steps  += 1
             total_steps += 1
 
             if not game_over:
-                next_boards, _, next_mask = compute_afterstates(game)
+                next_boards, _, next_mask, next_queue = compute_afterstates(game)
             else:
                 next_boards = np.zeros_like(boards)
-                next_mask = np.zeros(MAX_ACTIONS, dtype=np.float32)
+                next_mask   = np.zeros(MAX_ACTIONS, dtype=np.float32)
+                next_queue  = queue.copy()  # placeholder, won't be used (done=True)
 
-            buffer.push(chosen_board, r, next_boards, next_mask, game_over)
-            boards, mask = next_boards, next_mask.astype(bool)
+            buffer.push(chosen_board, chosen_queue, r,
+                        next_boards, next_queue, next_mask, game_over)
+            boards, mask, queue = next_boards, next_mask.astype(bool), next_queue
 
-            # Epsilon decay
             eps = max(eps_end, eps_start - (eps_start - eps_end) * total_steps / eps_steps)
 
             if total_steps % cfg["train_freq"] == 0:
-                train_step(q_net, q_target, optimizer, buffer, cfg["batch_size"], cfg["gamma"], device)
+                train_step(q_net, q_target, optimizer, buffer,
+                           cfg["batch_size"], cfg["gamma"], device)
 
             if total_steps % cfg["target_update_freq"] == 0:
                 q_target.load_state_dict(q_net.state_dict())
