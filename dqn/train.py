@@ -29,7 +29,8 @@ LINE_REWARDS = [0.0, 1.0, 3.0, 5.0, 8.0]
 
 
 def reward_fn(lines: int, game_over: bool) -> float:
-    return LINE_REWARDS[min(lines, 4)] + 0.1 - (1.0 if game_over else 0.0)
+    survival = 0.0 if game_over else 0.1
+    return LINE_REWARDS[min(lines, 4)] + survival - (1.0 if game_over else 0.0)
 
 
 def get_device(name: str) -> torch.device:
@@ -86,10 +87,11 @@ def train_step(
     nxt = torch.FloatTensor(next_boards).to(device)                   # (B, 40, H, W)
     nxt_flat = nxt.view(B * MAX_ACTIONS, 1, H, W)                     # (B*40, 1, H, W)
 
-    # Repeat each queue entry for all 40 candidate boards
+    # Repeat each queue entry for all 40 candidate boards.
+    # repeat_interleave produces a contiguous tensor (safe on MPS).
+    # expand().reshape() can crash on MPS due to non-contiguous memory.
     nxt_q = torch.LongTensor(next_queues).to(device)                  # (B, QL)
-    nxt_q_flat = nxt_q.unsqueeze(1).expand(B, MAX_ACTIONS, QUEUE_LEN) \
-                      .reshape(B * MAX_ACTIONS, QUEUE_LEN)             # (B*40, QL)
+    nxt_q_flat = nxt_q.repeat_interleave(MAX_ACTIONS, dim=0)          # (B*40, QL)
 
     mask_f = torch.FloatTensor(next_masks).to(device)                 # (B, 40)
 
