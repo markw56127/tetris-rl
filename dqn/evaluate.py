@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from tetris.game import Game
-from env.afterstate import compute_afterstates, MAX_ACTIONS
+from env.afterstate import compute_afterstates
 from agent.networks import QNetwork
 
 
@@ -21,15 +21,14 @@ def evaluate(model_path: str, n_episodes: int = 20, device_name: str = "cpu") ->
         ep_lines = 0
         ep_steps = 0
 
-        boards, _, mask, queue = compute_afterstates(game)
+        boards, _, mask = compute_afterstates(game)
 
         while not game.game_over and mask.any():
             valid = np.where(mask)[0]
-            b = torch.FloatTensor(boards[valid]).unsqueeze(1).to(device)
-            q = torch.LongTensor(queue).unsqueeze(0).expand(len(valid), -1).to(device)
+            t = torch.FloatTensor(boards[valid]).unsqueeze(1).to(device)
             with torch.no_grad():
-                vals = q_net(b, q).cpu().numpy()
-            action = int(valid[int(np.argmax(vals))])
+                q = q_net(t).cpu().numpy()
+            action = int(valid[int(np.argmax(q))])
 
             rot, col = action // 10, action % 10
             info = game.place_piece(rot, col, use_hold=False)
@@ -37,7 +36,7 @@ def evaluate(model_path: str, n_episodes: int = 20, device_name: str = "cpu") ->
             ep_steps += 1
 
             if not game.game_over:
-                boards, _, mask, queue = compute_afterstates(game)
+                boards, _, mask = compute_afterstates(game)
 
         all_lines.append(ep_lines)
         all_lengths.append(ep_steps)
