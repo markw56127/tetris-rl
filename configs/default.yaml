@@ -1,5 +1,5 @@
 training:
-  total_timesteps: 10_000_000
+  total_timesteps: 1_000_000
   n_envs: 8
   seed: 42
   checkpoint_freq: 500_000

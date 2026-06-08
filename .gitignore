@@ -10,5 +10,13 @@ __pycache__/
 checkpoints/
 runs/
 
+# Datasets / binaries (regenerable or downloadable — not committed)
+portfolio/data/
+portfolio/pytorch/data/
+portfolio/pytorch/raw/
+
+# In-progress / generated training logs
+dqn/training_short.log
+
 # Environment
 .env
