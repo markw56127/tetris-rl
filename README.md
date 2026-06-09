@@ -28,8 +28,7 @@ Both share the same Tetris engine (`tetris/`), so the comparison is apples-to-ap
 │   └── wrappers.py        #   Episode-stat recording, etc.
 ├── agent/                 # PPO model
 │   ├── ppo.py             #   build_model(): MaskablePPO + custom extractor
-│   ├── networks.py        #   TetrisCNNExtractor (CNN over board + piece/queue embeddings)
-│   └── rollout.py         #   Standalone GAE rollout buffer (reference implementation)
+│   └── networks.py        #   TetrisCNNExtractor (CNN over board + piece/queue embeddings)
 ├── configs/default.yaml   # PPO hyperparameters
 ├── train.py               # PPO training entry point
 ├── evaluate.py            # PPO evaluation / rendering
@@ -107,6 +106,22 @@ python evaluate.py --model checkpoints/best_model.pt --episodes 20
 ```
 
 DQN checkpoints are written to `dqn/checkpoints/`.
+
+## Results
+
+Greedy (deterministic) evaluation over 20 episodes, each on a distinct seed:
+
+| Agent | Training | Lines cleared / episode | Pieces placed / episode |
+|---|---|---|---|
+| Maskable PPO | 10M steps | 3.1 ± 1.6 | 81.8 ± 7.9 |
+| Afterstate DQN | 150k steps | **54.6 ± 37.5** | **166.8 ± 93.5** |
+
+Despite ~60× fewer training steps, the afterstate DQN dramatically outperforms PPO. Scoring
+the *resulting board* directly — rather than mapping an observation to an action index —
+turns Tetris into a much easier credit-assignment problem: the network only has to judge how
+good a board looks, and the legal-placement search handles the combinatorics. The afterstate
+DQN here was trained on the short (150k-step) schedule; the full 2M-step config clears
+substantially more.
 
 ## Notes
 

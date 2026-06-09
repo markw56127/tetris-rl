@@ -1,7 +1,6 @@
 from __future__ import annotations
-from typing import Dict, Tuple
+from typing import Dict
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -74,27 +73,3 @@ class TetrisCNNExtractor(BaseFeaturesExtractor):
 
         combined = torch.cat([board_feat, cp_feat, hold_feat, q_feat], dim=1)  # (B, 368)
         return self.fc(combined)  # (B, 256)
-
-
-class MaskedActorCriticPolicy(nn.Module):
-    """
-    Simple actor-critic that applies action masking before softmax.
-    Intended as a reference; MaskablePPO from sb3-contrib handles this automatically.
-    """
-
-    def __init__(self, features_dim: int = 256, n_actions: int = 81):
-        super().__init__()
-        self.actor = nn.Linear(features_dim, n_actions)
-        self.critic = nn.Linear(features_dim, 1)
-
-    def forward(
-        self,
-        features: torch.Tensor,
-        action_mask: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        logits = self.actor(features)
-        if action_mask is not None:
-            logits = logits.masked_fill(~action_mask.bool(), float("-inf"))
-        dist = torch.distributions.Categorical(logits=logits)
-        value = self.critic(features).squeeze(-1)
-        return dist, value

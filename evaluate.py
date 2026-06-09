@@ -11,8 +11,8 @@ from env.tetris_env import TetrisEnv
 from env.wrappers import RecordEpisodeStatistics
 
 
-def run_episode(model: MaskablePPO, env, render: bool = False) -> dict:
-    obs, _ = env.reset()
+def run_episode(model: MaskablePPO, env, seed: int = None, render: bool = False) -> dict:
+    obs, _ = env.reset(seed=seed)
     done = False
     while not done:
         action, _ = model.predict(obs, deterministic=True, action_masks=env.action_masks())
@@ -41,7 +41,7 @@ def main():
 
     rewards, lines, lengths = [], [], []
     for ep in range(args.episodes):
-        info = run_episode(model, env, render=args.render)
+        info = run_episode(model, env, seed=args.seed + ep, render=args.render)
         r = info.get("r", info.get("episode", {}).get("r", 0))
         l = info.get("lines", info.get("episode", {}).get("lines", 0))
         le = info.get("l", info.get("episode", {}).get("l", 0))
